@@ -1,130 +1,130 @@
-import torch
-import numpy as np
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm
+import optax
 from bias import BiasForce
+
+
+def loss_fn(params, positions, forces, log_tm, mds, args, policy):
+    biases = policy.apply(params, positions, mds.target_position)
+    means = positions + (forces + biases) * args.timestep
+    log_bpm = mds.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
+
+    log_z = (log_tm - log_bpm).mean()
+    loss = ((log_z + log_bpm - log_tm) ** 2).mean()
+    return loss
 
 
 class DiffusionPathSampler:
     def __init__(self, args, mds):
-        self.policy = BiasForce(args)
+        self.policy = BiasForce()
         self.target_measure = TargetMeasure(args, mds)
 
         if args.training:
+            positions = jnp.zeros(
+                (args.batch_size, args.num_steps + 1, 2),
+            )
+            self.params = self.policy.init(args.key, positions, mds.target_position)
+            self.optimizer = optax.adam(args.policy_lr)
+            self.opt_state = self.optimizer.init(self.params)
             self.replay = ReplayBuffer(args)
+            self.log_prob = mds.log_prob
+            self.target_position = mds.target_position
+            self.timestep = args.timestep
+            self.grad_fn = jax.value_and_grad(loss_fn)
 
-    def sample(self, args, mds, std):
-        positions = torch.zeros(
+    def sample(self, args, mds, std, key, buffer=False):
+        position = mds.start_position[None, :]
+        for s in range(100):
+            init_key, key = jax.random.split(key)
+            position = (
+                position
+                - mds.dUdx(position) * args.timestep
+                + mds.std * jax.random.normal(init_key, (args.num_samples, 2))
+            )
+
+        positions = jnp.zeros(
             (args.num_samples, args.num_steps + 1, 2),
-            device=args.device,
         )
-        forces = torch.zeros(
+        forces = jnp.zeros(
             (args.num_samples, args.num_steps + 1, 2),
-            device=args.device,
         )
-        noises = torch.normal(
-            torch.zeros(
-                (args.num_samples, args.num_steps, 2),
-                device=args.device,
-            ),
-            torch.ones(
-                (args.num_samples, args.num_steps, 2),
-                device=args.device,
-            ),
+        potentials = jnp.zeros(
+            (args.num_samples, args.num_steps + 1),
+        )
+        noises = jax.random.normal(
+            key,
+            (args.num_samples, args.num_steps, 2),
         )
 
-        position = mds.start_position.unsqueeze(0)
-        force = mds.energy_function(position)[0]
-        positions[:, 0] = position
-        forces[:, 0] = force
+        force = -mds.dUdx(position)
+        potential = mds.U(position)
+        positions = positions.at[:, 0].set(position)
+        forces = forces.at[:, 0].set(force)
+        potentials = potentials.at[:, 0].set(potential)
 
         for s in tqdm(range(args.num_steps), desc="Sampling"):
-            bias = (
-                self.policy(position.detach(), mds.target_position).squeeze().detach()
-            )
+            bias = self.policy.apply(
+                self.params, position, mds.target_position
+            ).squeeze()
             position = position + (force + bias) * args.timestep + std * noises[:, s]
-            force = mds.energy_function(position)[0]
+            force = -mds.dUdx(position)
 
-            positions[:, s + 1] = position
-            forces[:, s + 1] = force
+            positions = positions.at[:, s + 1].set(position)
+            forces = forces.at[:, s + 1].set(force)
+            potentials = potentials.at[:, s + 1].set(mds.U(position))
 
-        log_tm, final_idx = self.target_measure(positions, forces)
+        log_tm = self.target_measure(positions, forces)
 
-        if args.training:
+        if buffer:
             self.replay.add((positions, forces, log_tm))
 
-        for i in range(args.num_samples):
-            if final_idx is not None:
-                np.save(
-                    f"{args.save_dir}/positions/{i}.npy",
-                    positions[i][: final_idx[i] + 1].cpu().numpy(),
-                )
-            else:
-                np.save(
-                    f"{args.save_dir}/positions/{i}.npy",
-                    positions[i].cpu().numpy(),
-                )
+        return positions, potentials
 
-    def train(self, args, mds):
-        optimizer = torch.optim.Adam(
-            [
-                {"params": [self.policy.log_z], "lr": args.log_z_lr},
-                {"params": self.policy.mlp.parameters(), "lr": args.policy_lr},
-            ]
-        )
-
+    def train(self, args, mds, key):
         loss_sum = 0
         for _ in tqdm(range(args.trains_per_rollout), desc="Training"):
+            positions, forces, log_tm = self.replay.sample(key)
+            loss, grads = self.grad_fn(
+                self.params, positions, forces, log_tm, mds, args, self.policy
+            )
+            updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
+            self.params = optax.apply_updates(self.params, updates)
 
-            positions, forces, log_tm = self.replay.sample()
-            biases = self.policy(positions, mds.target_position)
-            means = positions + (forces + biases) * args.timestep
-            log_bpm = mds.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
+            loss_sum += loss
 
-            # Our implementation is based on results in appendix A.2
-            log_z = self.policy.log_z
-            loss = (log_z + log_bpm - log_tm).square().mean()
-            loss.backward()
-
-            for group in optimizer.param_groups:
-                torch.nn.utils.clip_grad_norm_(group["params"], args.max_grad_norm)
-
-            optimizer.step()
-            optimizer.zero_grad()
-
-            loss_sum += loss.item()
         loss = loss_sum / args.trains_per_rollout
         return loss
 
 
 class ReplayBuffer:
     def __init__(self, args):
-        self.positions = torch.zeros(
+        self.positions = jnp.zeros(
             (args.buffer_size, args.num_steps + 1, 2),
-            device=args.device,
         )
-        self.forces = torch.zeros(
+        self.forces = jnp.zeros(
             (args.buffer_size, args.num_steps + 1, 2),
-            device=args.device,
         )
-        self.log_reward = torch.zeros(args.buffer_size, device=args.device)
+        self.log_reward = jnp.zeros(args.buffer_size)
 
         self.idx = 0
+        self.key = args.key
         self.batch_size = args.batch_size
         self.num_samples = args.num_samples
         self.buffer_size = args.buffer_size
 
     def add(self, data):
-        indices = torch.arange(self.idx, self.idx + self.num_samples) % self.buffer_size
+        indices = jnp.arange(self.idx, self.idx + self.num_samples) % self.buffer_size
         self.idx += self.num_samples
 
-        (
-            self.positions[indices],
-            self.forces[indices],
-            self.log_reward[indices],
-        ) = data
+        self.positions = self.positions.at[indices].set(data[0])
+        self.forces = self.forces.at[indices].set(data[1])
+        self.log_reward = self.log_reward.at[indices].set(data[2])
 
-    def sample(self):
-        indices = torch.randint(0, min(self.idx, self.buffer_size), (self.batch_size,))
+    def sample(self, key):
+        indices = jax.random.randint(
+            key, (self.batch_size,), 0, min(self.idx, self.buffer_size)
+        )
         return (
             self.positions[indices],
             self.forces[indices],
@@ -141,28 +141,18 @@ class TargetMeasure:
 
     def __call__(self, positions, forces):
         log_upm = self.unbiased_path_measure(positions, forces)
-        log_ri, final_idx = self.relaxed_indicator(positions, self.target_position)
+        log_ri = self.log_relaxed_indicator(positions[:, -1], self.target_position)
 
         log_reward = log_upm + log_ri
-        return log_reward, final_idx
+        return log_reward
 
     def unbiased_path_measure(self, positions, forces):
         means = positions + forces * self.timestep
         log_upm = self.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
         return log_upm
 
-    def relaxed_indicator(self, positions, target_position):
-        log_ri, final_idx = (
-            self.rmsd(
-                positions.view(-1, positions.size(-1)),
-                target_position,
-            )
-            .view(positions.size(0), positions.size(1))
-            .max(1)
+    def log_relaxed_indicator(self, final_position, target_position):
+        log_rbf = (
+            -0.5 / self.sigma**2 * ((final_position - target_position) ** 2).mean(-1)
         )
-        return log_ri, final_idx
-
-    def rmsd(self, positions, target_position):
-        msd = (positions - target_position).square().mean(-1)
-        log_ri = -0.5 / self.sigma**2 * msd
-        return log_ri
+        return log_rbf

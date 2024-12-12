@@ -1,7 +1,7 @@
 import os
-import torch
+import jax
 import argparse
-from dynamics import Synthetic
+from system import System
 from dps import DiffusionPathSampler
 
 parser = argparse.ArgumentParser()
@@ -29,7 +29,7 @@ if __name__ == "__main__":
         if not os.path.exists(f"{args.save_dir}/{name}"):
             os.makedirs(f"{args.save_dir}/{name}")
 
-    mds = Synthetic(args)
+    mds = System(args)
     agent = DiffusionPathSampler(args, mds)
-    agent.policy.load_state_dict(torch.load(args.model_path))
+    agent.policy.load_state_dict(jax.load(args.model_path))
     agent.sample(args, mds, mds.std)

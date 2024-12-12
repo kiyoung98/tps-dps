@@ -1,7 +1,7 @@
 import os
 import sys
-import torch
 import logging
+from flax.training import checkpoints
 
 from .plot import Plot
 from .metrics import Metric
@@ -16,7 +16,7 @@ class Log:
 
         self.rmsd = float("inf")
 
-        # Logger basic configurationss
+        # Logger basic configurations
         self.logger = logging.getLogger("tps")
         self.logger.setLevel(logging.INFO)
 
@@ -47,25 +47,24 @@ class Log:
         if self.logger:
             self.logger.info(message)
 
-    def sample(
-        self,
-        rollout,
-        policy,
-    ):
+    def sample(self, rollout, policy, positions, potentials):
         self.logger.info("-----------------------------------------------------------")
         self.logger.info(f"Rollout: {rollout}")
 
-        metrics = self.metric()
+        metrics = self.metric(positions, potentials)
 
-        if rollout % 10:
-            self.plot()
-            torch.save(policy.state_dict(), f"{self.save_dir}/policies/{rollout}.pt")
+        # if rollout % 10 == 0:
+        #     self.plot(positions)
+        self.plot(positions, rollout)
+        #     checkpoints.save_checkpoint(
+        #         self.save_dir, policy, rollout, prefix="policies/"
+        #     )
 
-        if self.rmsd > metrics["rmsd"]:
-            self.rmsd = metrics["rmsd"]
-            torch.save(policy.state_dict(), f"{self.save_dir}/rmsd_policy.pt")
+        # if self.rmsd > metrics["rmsd"]:
+        #     self.rmsd = metrics["rmsd"]
+        #     checkpoints.save_checkpoint(self.save_dir, policy, 0, prefix="rmsd_policy")
 
-        self.logger.info(f"log_z: {policy.log_z.item()}")
+        # self.logger.info(f"log_z: {policy.log_z}")
         self.logger.info(f"rmsd: {metrics['rmsd']} ± {metrics['rmsd_std']}")
         self.logger.info(f"thp: {metrics['thp']}")
         self.logger.info(f"etp: {metrics['etp']} ± {metrics['etp_std']}")

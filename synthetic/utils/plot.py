@@ -1,5 +1,4 @@
-import torch
-import numpy as np
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 
@@ -8,35 +7,33 @@ class Plot:
         self.device = args.device
         self.save_dir = args.save_dir
         self.num_samples = args.num_samples
+
+        self.U = mds.U
         self.start_position = mds.start_position
         self.target_position = mds.target_position
-        self.energy_function = mds.energy_function
+        self.xlim = mds.xlim
+        self.ylim = mds.ylim
 
-    def __call__(self):
-        positions = []
-        for i in range(self.num_samples):
-            position = np.load(f"{self.save_dir}/positions/{i}.npy")
-            position = torch.from_numpy(position).to(self.device)
-            positions.append(position)
+    def __call__(self, positions, rollout):
+        self.paths(positions, rollout)
 
-        self.paths(positions)
-
-    def paths(self, positions):
+    def paths(self, positions, rollout):
         fig, ax = plt.subplots(figsize=(7, 7))
 
         zorder = 100
-        circle_size = 1200
-        saddle_size = 2400
 
-        plt.xlim(-1.5, 1.5)
-        plt.ylim(-1.5, 1.5)
-        x = np.linspace(-1.5, 1.5, 400)
-        y = np.linspace(-1.5, 1.5, 400)
-        X, Y = np.meshgrid(x, y)
+        plt.xlim(*self.xlim)
+        plt.ylim(*self.ylim)
+        x = jnp.linspace(*self.xlim, 400)
+        y = jnp.linspace(*self.ylim, 400)
+        X, Y = jnp.meshgrid(x, y)
 
-        Z = np.load(f"data/synthetic/landscape.npy")
+        # X, Y to position input
+        xs = jnp.stack([X.ravel(), Y.ravel()], axis=-1)
+        # calculate potential energy
+        Z = self.U(xs).reshape(X.shape)
 
-        ax.contourf(X, Y, Z, levels=zorder, zorder=0, vmax=3)
+        ax.contourf(X, Y, Z, levels=30)
 
         cm = plt.get_cmap("gist_rainbow")
 
@@ -45,11 +42,9 @@ class Plot:
         )
 
         for position in positions:
-            xs = position[:, 0].detach().cpu().numpy()
-            ys = position[:, 1].detach().cpu().numpy()
             ax.plot(
-                xs,
-                ys,
+                position[:, 0],
+                position[:, 1],
                 marker="o",
                 linestyle="None",
                 markersize=2,
@@ -59,33 +54,12 @@ class Plot:
 
         # Plot start and end positions
         ax.scatter(
-            [self.start_position[0].item()],
-            [self.start_position[1].item()],
+            [self.start_position[0], self.target_position[0]],
+            [self.start_position[1], self.target_position[1]],
             edgecolors="black",
             c="w",
             zorder=zorder,
-            s=circle_size,
         )
-        ax.scatter(
-            [self.target_position[0].item()],
-            [self.target_position[1].item()],
-            edgecolors="black",
-            c="w",
-            zorder=zorder,
-            s=circle_size,
-        )
-
-        saddle_points = [(0, 1), (0, -1)]
-        for saddle in saddle_points:
-            ax.scatter(
-                saddle[0],
-                saddle[1],
-                edgecolors="black",
-                c="w",
-                zorder=zorder,
-                s=saddle_size,
-                marker="*",
-            )
 
         # Plot basic configs
         ax.set_xlabel("x", fontsize=24, fontweight="medium")
@@ -98,7 +72,7 @@ class Plot:
             bottom=False,
         )
         plt.tight_layout()
-        plt.savefig(f"{self.save_dir}/paths.png")
+        plt.savefig(f"{self.save_dir}/paths/{rollout}.png")
         plt.show()
         plt.close()
         return fig
