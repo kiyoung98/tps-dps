@@ -1,114 +1,95 @@
 import jax
-import jax.numpy as jnp
-from tqdm import tqdm
 import optax
+import jax.numpy as jnp
 from bias import BiasForce
 
 
-def loss_fn(params, positions, forces, log_tm, mds, args, policy):
-    biases = policy.apply(params, positions, mds.target_position)
-    means = positions + (forces + biases) * args.timestep
-    log_bpm = mds.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
-
-    log_z = (log_tm - log_bpm).mean()
-    loss = ((log_z + log_bpm - log_tm) ** 2).mean()
-    return loss
-
-
 class DiffusionPathSampler:
-    def __init__(self, args, mds):
-        self.policy = BiasForce()
+    def __init__(self, args, mds, key):
+        self.policy = BiasForce(args.bias, args.hidden_dim)
+        self.replay = ReplayBuffer(args)
         self.target_measure = TargetMeasure(args, mds)
 
-        if args.training:
-            positions = jnp.zeros(
-                (args.batch_size, args.num_steps + 1, 2),
-            )
-            self.params = self.policy.init(args.key, positions, mds.target_position)
-            self.optimizer = optax.adam(args.policy_lr)
-            self.opt_state = self.optimizer.init(self.params)
-            self.replay = ReplayBuffer(args)
-            self.log_prob = mds.log_prob
-            self.target_position = mds.target_position
-            self.timestep = args.timestep
-            self.grad_fn = jax.value_and_grad(loss_fn)
+        self.timestep = args.timestep
 
-    def sample(self, args, mds, std, key, buffer=False):
-        position = mds.start_position[None, :]
-        for s in range(100):
-            init_key, key = jax.random.split(key)
+        self.params = self.policy.init(
+            key,
+            jnp.zeros(
+                (args.batch_size, args.num_steps, 2),
+            ),
+            mds.target_position,
+        )
+
+        self.optimizer = optax.adam(args.policy_lr)
+        self.opt_state = self.optimizer.init(self.params)
+
+        @jax.jit
+        def loss_fn(params, positions, forces, log_tm):
+            biases = self.policy.apply(params, positions, mds.target_position)
+            means = positions + (forces + biases) * self.timestep
+            log_bpm = mds.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
+
+            log_z = (log_tm - log_bpm).mean()
+            loss = ((log_z + log_bpm - log_tm) ** 2).mean()
+            return loss
+
+        self.grad_fn = jax.value_and_grad(loss_fn)
+
+    def sample(self, args, mds, std, key):
+        def step(carry, key):
+            position, force = carry
+            bias = self.policy.apply(self.params, position, mds.target_position)
             position = (
                 position
-                - mds.dUdx(position) * args.timestep
-                + mds.std * jax.random.normal(init_key, (args.num_samples, 2))
+                + (force + bias) * args.timestep
+                + std * jax.random.normal(key, position.shape)
             )
-
-        positions = jnp.zeros(
-            (args.num_samples, args.num_steps + 1, 2),
-        )
-        forces = jnp.zeros(
-            (args.num_samples, args.num_steps + 1, 2),
-        )
-        potentials = jnp.zeros(
-            (args.num_samples, args.num_steps + 1),
-        )
-        noises = jax.random.normal(
-            key,
-            (args.num_samples, args.num_steps, 2),
-        )
-
-        force = -mds.dUdx(position)
-        potential = mds.U(position)
-        positions = positions.at[:, 0].set(position)
-        forces = forces.at[:, 0].set(force)
-        potentials = potentials.at[:, 0].set(potential)
-
-        for s in tqdm(range(args.num_steps), desc="Sampling"):
-            bias = self.policy.apply(
-                self.params, position, mds.target_position
-            ).squeeze()
-            position = position + (force + bias) * args.timestep + std * noises[:, s]
             force = -mds.dUdx(position)
+            return (position, force), (position, force, mds.U(position))
 
-            positions = positions.at[:, s + 1].set(position)
-            forces = forces.at[:, s + 1].set(force)
-            potentials = potentials.at[:, s + 1].set(mds.U(position))
-
+        position = jnp.tile(mds.start_position, (args.num_samples, 1))
+        force = -mds.dUdx(position)
+        keys = jax.random.split(key, args.num_steps)
+        positions, forces, potentials = jax.lax.scan(step, (position, force), keys)[1]
+        positions = jnp.swapaxes(positions, 0, 1)
+        forces = jnp.swapaxes(forces, 0, 1)
+        potentials = jnp.swapaxes(potentials, 0, 1)
         log_tm = self.target_measure(positions, forces)
-
-        if buffer:
-            self.replay.add((positions, forces, log_tm))
+        self.replay.add((positions, forces, log_tm))
 
         return positions, potentials
 
-    def train(self, args, mds, key):
-        loss_sum = 0
-        for _ in tqdm(range(args.trains_per_rollout), desc="Training"):
+    def train(self, args, key):
+        def train_step(carry, key):
+            params, opt_state = carry
             positions, forces, log_tm = self.replay.sample(key)
-            loss, grads = self.grad_fn(
-                self.params, positions, forces, log_tm, mds, args, self.policy
-            )
-            updates, self.opt_state = self.optimizer.update(grads, self.opt_state)
-            self.params = optax.apply_updates(self.params, updates)
+            loss, grads = self.grad_fn(params, positions, forces, log_tm)
+            updates, opt_state = self.optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
+            return (params, opt_state), loss
 
-            loss_sum += loss
-
-        loss = loss_sum / args.trains_per_rollout
+        keys = jax.random.split(key, args.trains_per_rollout)
+        (self.params, self.opt_state), losses = jax.lax.scan(
+            train_step,
+            (self.params, self.opt_state),
+            keys,
+            length=args.trains_per_rollout,
+        )
+        loss = losses.mean()
         return loss
 
 
 class ReplayBuffer:
     def __init__(self, args):
         self.positions = jnp.zeros(
-            (args.buffer_size, args.num_steps + 1, 2),
+            (args.buffer_size, args.num_steps, 2),
         )
         self.forces = jnp.zeros(
-            (args.buffer_size, args.num_steps + 1, 2),
+            (args.buffer_size, args.num_steps, 2),
         )
         self.log_reward = jnp.zeros(args.buffer_size)
 
         self.idx = 0
-        self.key = args.key
         self.batch_size = args.batch_size
         self.num_samples = args.num_samples
         self.buffer_size = args.buffer_size
@@ -141,7 +122,7 @@ class TargetMeasure:
 
     def __call__(self, positions, forces):
         log_upm = self.unbiased_path_measure(positions, forces)
-        log_ri = self.log_relaxed_indicator(positions[:, -1], self.target_position)
+        log_ri = self.log_relaxed_indicator(positions[:, -1])
 
         log_reward = log_upm + log_ri
         return log_reward
@@ -151,8 +132,10 @@ class TargetMeasure:
         log_upm = self.log_prob(positions[:, 1:] - means[:, :-1]).mean((1, 2))
         return log_upm
 
-    def log_relaxed_indicator(self, final_position, target_position):
+    def log_relaxed_indicator(self, final_position):
         log_rbf = (
-            -0.5 / self.sigma**2 * ((final_position - target_position) ** 2).mean(-1)
+            -0.5
+            / self.sigma**2
+            * ((final_position - self.target_position) ** 2).mean(-1)
         )
         return log_rbf

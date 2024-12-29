@@ -1,17 +1,20 @@
 import os
 import jax
-import jax.numpy as jnp
+import time
+import wandb
 import argparse
-
-from utils.logging import Log
+import jax.numpy as jnp
 from system import System
+from utils.logging import Log
 from dps import DiffusionPathSampler
 
 parser = argparse.ArgumentParser()
 
 # System Config
 parser.add_argument("--seed", default=0, type=int)
+parser.add_argument("--wandb", action="store_true")
 parser.add_argument("--device", default="cuda", type=str)
+parser.add_argument("--project", default="synthetic", type=str)
 parser.add_argument("--system", default="double_well_dual_channel", type=str)
 
 
@@ -20,9 +23,10 @@ parser.add_argument("--save_dir", default="results/synthetic", type=str)
 
 # Policy Config
 parser.add_argument("--bias", default="pot", type=str)
+parser.add_argument("--hidden_dim", default=32, type=int)
 
 # Sampling Config
-parser.add_argument("--sigma", default=0.2, type=float)
+parser.add_argument("--sigma", default=0.4, type=float)
 parser.add_argument("--num_steps", default=1000, type=int)
 parser.add_argument("--timestep", default=1e-3, type=float)
 parser.add_argument("--num_samples", default=512, type=int)
@@ -34,12 +38,12 @@ parser.add_argument("--num_samples", default=512, type=int)
 parser.add_argument("--num_rollouts", default=20, type=int)
 parser.add_argument("--max_grad_norm", default=1, type=int)
 parser.add_argument("--xi", default=1e-1, type=float)
-parser.add_argument("--start_xi", default=1, type=float)
-parser.add_argument("--end_xi", default=1, type=float)
+parser.add_argument("--start_xi", default=0.5, type=float)
+parser.add_argument("--end_xi", default=0.5, type=float)
 # parser.add_argument("--log_z_lr", default=1e-3, type=float)
 parser.add_argument(
     "--policy_lr",
-    default=5e-4,
+    default=1e-3,
     type=float,
 )
 parser.add_argument("--batch_size", default=4048, type=int)
@@ -58,27 +62,23 @@ args = parser.parse_args()
 
 if __name__ == "__main__":
     args.training = True
-    for name in ["policies", "positions", "paths"]:
+    key = jax.random.PRNGKey(args.seed)
+    for name in [
+        "policies",
+        "positions",
+        "paths",
+        "force_fields",
+        "energy_distributions",
+        "y_distributions",
+    ]:
         if not os.path.exists(f"{args.save_dir}/{name}"):
             os.makedirs(f"{args.save_dir}/{name}")
-
-    args.key = jax.random.PRNGKey(args.seed)
-    key = args.key
-
-    # check if we can use gpu
-    if jax.device_count() == 0:
-        print("No GPU found. Using CPU")
+    if args.wandb:
+        wandb.init(project=args.project, config=args)
 
     mds = System(args)
     log = Log(args, mds)
-    agent = DiffusionPathSampler(args, mds)
-
-    # temperatures = jnp.linspace(
-    #     args.start_temperature, args.end_temperature, args.num_rollouts
-    # )
-
-    # stds = jnp.sqrt(2 * mds.kB * args.timestep * temperatures)
-    # std = jnp.sqrt(2 * mds.kB * args.timestep * args.temperature)
+    dps = DiffusionPathSampler(args, mds, key)
 
     std = args.xi * jnp.sqrt(args.timestep)
     stds = jnp.linspace(args.start_xi, args.end_xi, args.num_rollouts) * jnp.sqrt(
@@ -88,15 +88,15 @@ if __name__ == "__main__":
     log.info("Start training")
     for rollout in range(args.num_rollouts):
         print(f"Rollout: {rollout}")
-
-        key, _ = jax.random.split(key)
-        agent.sample(args, mds, stds[rollout], key, True)
-        loss = agent.train(args, mds, key)
+        start = time.time()
+        key, subkey = jax.random.split(key)
+        positions, potentials = dps.sample(args, mds, stds[rollout], key)
+        log.sample(rollout, dps, positions, potentials)
+        loss = dps.train(args, subkey)
+        print(f"Time: {time.time() - start}")
         log.logger.info(f"loss: {loss}")
-        positions, potentials = agent.sample(args, mds, std, key, False)
-        log.sample(rollout, agent.policy, positions, potentials)
     log.info("End training")
 
-    key, _ = jax.random.split(key)
-    positions, potentials = agent.sample(args, mds, std, key)
-    log.sample(args.num_rollouts, agent.policy, positions, potentials)
+    key = jax.random.split(key)[0]
+    positions, potentials = dps.sample(args, mds, std, key)
+    log.sample(args.num_rollouts, dps, positions, potentials)

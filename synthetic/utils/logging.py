@@ -1,7 +1,7 @@
 import os
 import sys
+import wandb
 import logging
-from flax.training import checkpoints
 
 from .plot import Plot
 from .metrics import Metric
@@ -9,6 +9,7 @@ from .metrics import Metric
 
 class Log:
     def __init__(self, args, mds):
+        self.wandb = args.wandb
         self.save_dir = args.save_dir
 
         self.plot = Plot(args, mds)
@@ -47,15 +48,17 @@ class Log:
         if self.logger:
             self.logger.info(message)
 
-    def sample(self, rollout, policy, positions, potentials):
+    def sample(self, rollout, agent, positions, potentials):
         self.logger.info("-----------------------------------------------------------")
         self.logger.info(f"Rollout: {rollout}")
 
+        log = {}
         metrics = self.metric(positions, potentials)
+        log.update(metrics)
 
-        # if rollout % 10 == 0:
-        #     self.plot(positions)
-        self.plot(positions, rollout)
+        if rollout % 10 == 0:
+            plots = self.plot(positions, potentials, agent, rollout)
+            log.update(plots)
         #     checkpoints.save_checkpoint(
         #         self.save_dir, policy, rollout, prefix="policies/"
         #     )
@@ -68,3 +71,6 @@ class Log:
         self.logger.info(f"rmsd: {metrics['rmsd']} ± {metrics['rmsd_std']}")
         self.logger.info(f"thp: {metrics['thp']}")
         self.logger.info(f"etp: {metrics['etp']} ± {metrics['etp_std']}")
+
+        if self.wandb:
+            wandb.log(log, step=rollout)

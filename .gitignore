@@ -1,7 +1,7 @@
-openmmforcefields/
 **/__pycache__/
 .ipynb_checkpoints/
 
 scripts/
 paths/
 results/
+wandb/

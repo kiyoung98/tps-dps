@@ -1,5 +1,0 @@
-data/bba/bba.gro filter=lfs diff=lfs merge=lfs -text
-data/bbl/bbl.gro filter=lfs diff=lfs merge=lfs -text
-page/data/bba/bba.gro filter=lfs diff=lfs merge=lfs -text
-page/data/bbl/bbl.gro filter=lfs diff=lfs merge=lfs -text
-page/data/trpcage/trpcage.gro filter=lfs diff=lfs merge=lfs -text
