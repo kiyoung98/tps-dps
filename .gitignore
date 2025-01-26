@@ -1,10 +1,5 @@
 **/__pycache__/
 .ipynb_checkpoints/
 
-scripts/
 paths/
 results/
-wandb/
-trajs/
-md.sh
-simulate.py

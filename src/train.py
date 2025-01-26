@@ -29,7 +29,7 @@ parser.add_argument(
     "--forcefield",
     type=str,
     nargs="+",
-    default=["amber14/protein.ff14SB.xml", "amber14/tip3p.xml"],
+    default=["data/protein.ff14SB.xml", "data/tip3p.xml"],
 )
 
 # Policy Config

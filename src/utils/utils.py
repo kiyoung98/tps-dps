@@ -74,7 +74,7 @@ def tic_diff(molecule, A_file, B_file, position, B):
     tic2_diff = jnp.abs(tica[:, 1] - B_tica[:, 1])
     return tic1_diff, tic2_diff
 
-def alanine_torsion_diff(position, B):
+def aldp_torsion_diff(position, B):
     angle_2 = jnp.array([1, 6, 8, 14])
     angle_1 = jnp.array([6, 8, 14, 16])
 

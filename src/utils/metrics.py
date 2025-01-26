@@ -40,7 +40,7 @@ class Metric:
     def thp(self, position):
         B = self.B.reshape(1, -1, 3)
         if self.molecule == "aldp":
-            cv1_diff, cv2_diff = alanine_torsion_diff(position, B)
+            cv1_diff, cv2_diff = aldp_torsion_diff(position, B)
         else:
             cv1_diff, cv2_diff = tic_diff(self.molecule, self.A_file, self.B_file, position, B)
         hit = (cv1_diff**2 + cv2_diff**2) < 0.75**2
