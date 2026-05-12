@@ -57,10 +57,12 @@ We provide instructions to reproduce the results of aldp and train a new model. 
 ## Citation
 
 ```bibtex
-@article{seong2024transition,
-  title={Transition Path Sampling with Improved Off-Policy Training of Diffusion Path Samplers},
+@inproceedings{seong2025transition,
+  title={Transition path sampling with improved off-policy training of diffusion path samplers},
   author={Seong, Kiyoung and Park, Seonghyun and Kim, Seonghwan and Kim, Woo Youn and Ahn, Sungsoo},
-  journal={arXiv preprint arXiv:2405.19961},
-  year={2024}
+  booktitle={International Conference on Learning Representations},
+  volume={2025},
+  pages={93040--93062},
+  year={2025}
 }
 ```
